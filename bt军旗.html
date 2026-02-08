@@ -1,0 +1,749 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <title>蓝牙直连 · 军旗双人对战（完整版）</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { font-family: Arial, sans-serif; background: #f5f5f5; padding: 10px; }
+    .container { max-width: 800px; margin: 0 auto; background: white; border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); padding: 20px; }
+    h1 { text-align: center; color: #333; font-size: 20px; margin-bottom: 15px; }
+    .btn-panel { text-align: center; margin-bottom: 15px; }
+    .btn-panel button { padding: 10px 20px; margin: 0 5px; background: #007bff; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 16px; }
+    .btn-panel button:disabled { background: #6c757d; cursor: not-allowed; }
+    #message { margin: 10px 0; padding: 12px; border-radius: 4px; text-align: center; font-size: 14px; min-height: 40px; }
+    .info { background: #d4edda; color: #155724; }
+    .error { background: #f8d7da; color: #721c24; }
+    .success { background: #cce5ff; color: #004085; }
+    .warn { background: #fff3cd; color: #856404; }
+    
+    /* 军旗棋盘样式 */
+    .chess-board { 
+      width: min(100%, 600px); 
+      height: calc(min(100%, 600px) * 5/9); 
+      margin: 0 auto; 
+      border: 2px solid #333; 
+      background: #fff; 
+      position: relative; 
+      display: none;
+      background-image: 
+        linear-gradient(#333 1px, transparent 1px),
+        linear-gradient(90deg, #333 1px, transparent 1px);
+      background-size: calc(100%/9), calc(100%/5);
+    }
+    .chess-cell {
+      position: absolute;
+      width: calc(100%/9);
+      height: 20%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+      z-index: 1;
+    }
+    /* 特殊地形：铁路、山、大本营 */
+    .cell-rail { background: rgba(255, 204, 102, 0.2); }
+    .cell-mountain { background: rgba(153, 102, 51, 0.3); pointer-events: none; }
+    .cell-camp { background: rgba(102, 153, 255, 0.2); }
+    
+    /* 棋子样式 */
+    .chess-piece {
+      width: 90%;
+      height: 90%;
+      border-radius: 50%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 12px;
+      font-weight: bold;
+      cursor: grab;
+      user-select: none;
+      box-shadow: 0 2px 5px rgba(0,0,0,0.2);
+      position: absolute;
+      z-index: 2;
+      transition: all 0.2s ease;
+    }
+    .chess-piece.red { background: #dc3545; color: white; }
+    .chess-piece.black { background: #212529; color: white; }
+    .chess-piece.mine { background: #ffc107; color: #333; }
+    .chess-piece.flag { background: #17a2b8; color: white; }
+    .chess-piece.dragging { opacity: 0.8; transform: scale(1.05); z-index: 10; }
+    .chess-piece.captured { display: none; }
+    
+    /* 对战信息 */
+    .game-info {
+      display: flex;
+      justify-content: space-between;
+      margin: 10px auto;
+      width: min(100%, 600px);
+      font-size: 14px;
+    }
+    .game-over {
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      background: rgba(0,0,0,0.8);
+      color: white;
+      padding: 20px 40px;
+      border-radius: 8px;
+      font-size: 18px;
+      text-align: center;
+      z-index: 99;
+      display: none;
+    }
+    .game-over button {
+      margin-top: 15px;
+      padding: 8px 16px;
+      background: #007bff;
+      color: white;
+      border: none;
+      border-radius: 4px;
+      cursor: pointer;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>蓝牙直连 · 军旗双人对战（完整版）</h1>
+    
+    <!-- 蓝牙操作面板 -->
+    <div class="btn-panel">
+      <button id="hostBtn" onclick="startAsHost()">我做红方（主机）</button>
+      <button id="clientBtn" onclick="startAsClient()">我做黑方（从机）</button>
+    </div>
+    
+    <!-- 消息提示 -->
+    <div id="message" class="info">请选择「红方/黑方」，开启蓝牙后连接</div>
+    
+    <!-- 对战信息 -->
+    <div class="game-info">
+      <div>当前回合：<span id="currentTurn">未开始</span></div>
+      <div>你的阵营：<span id="myRole">未选择</span></div>
+    </div>
+    
+    <!-- 军旗棋盘 -->
+    <div class="chess-board" id="chessBoard">
+      <!-- 棋盘格子和棋子由JS动态生成 -->
+      <div class="game-over" id="gameOverPanel">
+        <div id="winnerText">红方胜利！</div>
+        <button onclick="restartGame()">重新开始</button>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    // ========== 全局配置 ==========
+    // 蓝牙配置
+    const SERVICE_UUID = '0000ffe0-0000-1000-8000-00805f9b34fb';
+    const CHARACTERISTIC_UUID = '0000ffe1-0000-1000-8000-00805f9b34fb';
+    let bluetoothServer = null;
+    let bluetoothSocket = null;
+    let bluetoothDevice = null; // 保存蓝牙设备用于重连
+    let isHost = false;
+    let reconnectionTimer = null; // 断线重连定时器
+    
+    // 军旗核心配置
+    const CHESS_TYPES = {
+      // 棋子等级：数字越大等级越高，0为特殊棋子
+      司令: 12, 军长: 11, 师长: 10, 旅长: 9, 团长: 8, 营长: 7, 
+      连长: 6, 排长: 5, 工兵: 4, 炸弹: 3, 地雷: 2, 军旗: 1, 空: 0
+    };
+    const BOARD_CONFIG = {
+      rows: 5, // 行数
+      cols: 9, // 列数
+      // 特殊地形：[行,列] 0开始
+      mountains: [[1,2],[1,3],[1,5],[1,6],[2,2],[2,3],[2,5],[2,6],[3,2],[3,3],[3,5],[3,6]],
+      redCamp: [[0,4]], // 红方大本营
+      blackCamp: [[4,4]], // 黑方大本营
+      rails: [[0,0],[0,1],[0,2],[0,3],[0,5],[0,6],[0,7],[0,8],
+              [1,0],[1,1],[1,4],[1,7],[1,8],
+              [2,0],[2,1],[2,4],[2,7],[2,8],
+              [3,0],[3,1],[3,4],[3,7],[3,8],
+              [4,0],[4,1],[4,2],[4,3],[4,5],[4,6],[4,7],[4,8]]
+    };
+    
+    // 游戏状态
+    let gameState = {
+      isHost: false,
+      myRole: '', // red/black
+      currentTurn: 'red', // 初始红方先走
+      chessData: {}, // 所有棋子位置和状态
+      isGameOver: false,
+      winner: ''
+    };
+    let selectedPiece = null; // 当前选中的棋子
+
+    // ========== 初始化棋盘 ==========
+    function initChessBoard() {
+      const board = document.getElementById('chessBoard');
+      board.innerHTML = '<div class="game-over" id="gameOverPanel"><div id="winnerText">红方胜利！</div><button onclick="restartGame()">重新开始</button></div>';
+      
+      // 生成棋盘格子
+      for (let row = 0; row < BOARD_CONFIG.rows; row++) {
+        for (let col = 0; col < BOARD_CONFIG.cols; col++) {
+          const cell = document.createElement('div');
+          cell.className = 'chess-cell';
+          cell.id = `cell-${row}-${col}`;
+          cell.style.top = `${row * 20}%`;
+          cell.style.left = `${col * (100/9)}%`;
+          
+          // 标记特殊地形
+          if (BOARD_CONFIG.mountains.some(m => m[0] === row && m[1] === col)) {
+            cell.classList.add('cell-mountain');
+          } else if (BOARD_CONFIG.redCamp.some(c => c[0] === row && c[1] === col)) {
+            cell.classList.add('cell-camp');
+          } else if (BOARD_CONFIG.blackCamp.some(c => c[0] === row && c[1] === col)) {
+            cell.classList.add('cell-camp');
+          } else if (BOARD_CONFIG.rails.some(r => r[0] === row && r[1] === col)) {
+            cell.classList.add('cell-rail');
+          }
+          
+          cell.onclick = () => handleCellClick(row, col);
+          board.appendChild(cell);
+        }
+      }
+      
+      // 初始化棋子数据
+      initChessPieces();
+      renderChessPieces();
+      
+      // 更新对战信息
+      document.getElementById('myRole').textContent = gameState.myRole === 'red' ? '红方' : '黑方';
+      document.getElementById('currentTurn').textContent = gameState.currentTurn === 'red' ? '红方' : '黑方';
+    }
+
+    // 初始化棋子位置（标准军旗布局）
+    function initChessPieces() {
+      gameState.chessData = {
+        // 红方棋子（上半区）
+        red: [
+          { type: '军旗', row: 0, col: 4, isCaptured: false, isMovable: false },
+          { type: '地雷', row: 0, col: 2, isCaptured: false, isMovable: false },
+          { type: '地雷', row: 0, col: 3, isCaptured: false, isMovable: false },
+          { type: '地雷', row: 0, col: 5, isCaptured: false, isMovable: false },
+          { type: '炸弹', row: 0, col: 1, isCaptured: false, isMovable: true },
+          { type: '炸弹', row: 0, col: 7, isCaptured: false, isMovable: true },
+          { type: '司令', row: 1, col: 0, isCaptured: false, isMovable: true },
+          { type: '军长', row: 1, col: 8, isCaptured: false, isMovable: true },
+          { type: '师长', row: 1, col: 1, isCaptured: false, isMovable: true },
+          { type: '师长', row: 1, col: 7, isCaptured: false, isMovable: true },
+          { type: '旅长', row: 2, col: 0, isCaptured: false, isMovable: true },
+          { type: '旅长', row: 2, col: 8, isCaptured: false, isMovable: true },
+          { type: '团长', row: 2, col: 1, isCaptured: false, isMovable: true },
+          { type: '团长', row: 2, col: 7, isCaptured: false, isMovable: true },
+          { type: '营长', row: 3, col: 0, isCaptured: false, isMovable: true },
+          { type: '营长', row: 3, col: 8, isCaptured: false, isMovable: true },
+          { type: '连长', row: 3, col: 1, isCaptured: false, isMovable: true },
+          { type: '连长', row: 3, col: 7, isCaptured: false, isMovable: true },
+          { type: '排长', row: 4, col: 0, isCaptured: false, isMovable: true },
+          { type: '排长', row: 4, col: 8, isCaptured: false, isMovable: true },
+          { type: '排长', row: 4, col: 1, isCaptured: false, isMovable: true },
+          { type: '排长', row: 4, col: 7, isCaptured: false, isMovable: true },
+          { type: '工兵', row: 4, col: 2, isCaptured: false, isMovable: true },
+          { type: '工兵', row: 4, col: 3, isCaptured: false, isMovable: true },
+          { type: '工兵', row: 4, col: 5, isCaptured: false, isMovable: true },
+          { type: '工兵', row: 4, col: 6, isCaptured: false, isMovable: true }
+        ],
+        // 黑方棋子（下半区）
+        black: [
+          { type: '军旗', row: 4, col: 4, isCaptured: false, isMovable: false },
+          { type: '地雷', row: 4, col: 2, isCaptured: false, isMovable: false },
+          { type: '地雷', row: 4, col: 3, isCaptured: false, isMovable: false },
+          { type: '地雷', row: 4, col: 5, isCaptured: false, isMovable: false },
+          { type: '炸弹', row: 4, col: 1, isCaptured: false, isMovable: true },
+          { type: '炸弹', row: 4, col: 7, isCaptured: false, isMovable: true },
+          { type: '司令', row: 3, col: 8, isCaptured: false, isMovable: true },
+          { type: '军长', row: 3, col: 0, isCaptured: false, isMovable: true },
+          { type: '师长', row: 3, col: 7, isCaptured: false, isMovable: true },
+          { type: '师长', row: 3, col: 1, isCaptured: false, isMovable: true },
+          { type: '旅长', row: 2, col: 8, isCaptured: false, isMovable: true },
+          { type: '旅长', row: 2, col: 0, isCaptured: false, isMovable: true },
+          { type: '团长', row: 2, col: 7, isCaptured: false, isMovable: true },
+          { type: '团长', row: 2, col: 1, isCaptured: false, isMovable: true },
+          { type: '营长', row: 1, col: 8, isCaptured: false, isMovable: true },
+          { type: '营长', row: 1, col: 0, isCaptured: false, isMovable: true },
+          { type: '连长', row: 1, col: 7, isCaptured: false, isMovable: true },
+          { type: '连长', row: 1, col: 1, isCaptured: false, isMovable: true },
+          { type: '排长', row: 0, col: 8, isCaptured: false, isMovable: true },
+          { type: '排长', row: 0, col: 0, isCaptured: false, isMovable: true },
+          { type: '排长', row: 0, col: 7, isCaptured: false, isMovable: true },
+          { type: '排长', row: 0, col: 1, isCaptured: false, isMovable: true },
+          { type: '工兵', row: 0, col: 2, isCaptured: false, isMovable: true },
+          { type: '工兵', row: 0, col: 3, isCaptured: false, isMovable: true },
+          { type: '工兵', row: 0, col: 5, isCaptured: false, isMovable: true },
+          { type: '工兵', row: 0, col: 6, isCaptured: false, isMovable: true }
+        ]
+      };
+      gameState.isGameOver = false;
+      gameState.winner = '';
+    }
+
+    // 渲染棋子到棋盘
+    function renderChessPieces() {
+      // 清空现有棋子
+      document.querySelectorAll('.chess-piece').forEach(p => p.remove());
+      
+      const board = document.getElementById('chessBoard');
+      
+      // 渲染红方棋子
+      gameState.chessData.red.forEach(piece => {
+        if (!piece.isCaptured) {
+          createPieceElement(piece, 'red', board);
+        }
+      });
+      
+      // 渲染黑方棋子
+      gameState.chessData.black.forEach(piece => {
+        if (!piece.isCaptured) {
+          createPieceElement(piece, 'black', board);
+        }
+      });
+    }
+
+    // 创建棋子DOM元素
+    function createPieceElement(piece, color, board) {
+      const pieceEl = document.createElement('div');
+      pieceEl.className = `chess-piece ${color} ${piece.type === '地雷' ? 'mine' : piece.type === '军旗' ? 'flag' : ''}`;
+      pieceEl.id = `${color}-${piece.type}-${piece.row}-${piece.col}`;
+      pieceEl.textContent = piece.type;
+      pieceEl.style.top = `${piece.row * 20}%`;
+      pieceEl.style.left = `${piece.col * (100/9)}%`;
+      
+      // 只有自己的回合且是自己的棋子才能拖动
+      if (gameState.currentTurn === color && gameState.myRole === color && piece.isMovable) {
+        pieceEl.onmousedown = (e) => startDrag(e, piece, color);
+        pieceEl.ontouchstart = (e) => startDrag(e, piece, color);
+      }
+      
+      board.appendChild(pieceEl);
+    }
+
+    // 开始拖拽棋子
+    function startDrag(e, piece, color) {
+      e.preventDefault();
+      selectedPiece = { ...piece, color };
+      
+      const pieceEl = document.getElementById(`${color}-${piece.type}-${piece.row}-${piece.col}`);
+      pieceEl.classList.add('dragging');
+      
+      // 绑定拖拽事件
+      document.onmousemove = (e) => dragPiece(e, pieceEl);
+      document.ontouchmove = (e) => dragPiece(e, pieceEl);
+      
+      // 绑定释放事件
+      document.onmouseup = stopDrag;
+      document.ontouchend = stopDrag;
+    }
+
+    // 拖拽棋子
+    function dragPiece(e, pieceEl) {
+      if (!selectedPiece) return;
+      
+      const board = document.getElementById('chessBoard');
+      const boardRect = board.getBoundingClientRect();
+      
+      // 兼容鼠标和触摸事件
+      const x = e.clientX || e.touches[0].clientX;
+      const y = e.clientY || e.touches[0].clientY;
+      
+      // 计算相对位置
+      const relX = x - boardRect.left - pieceEl.offsetWidth / 2;
+      const relY = y - boardRect.top - pieceEl.offsetHeight / 2;
+      
+      // 限制在棋盘内
+      pieceEl.style.left = `${Math.max(0, Math.min(relX / boardRect.width * 100, 100 - (100/9)))}%`;
+      pieceEl.style.top = `${Math.max(0, Math.min(relY / boardRect.height * 100, 100 - 20))}%`;
+    }
+
+    // 停止拖拽（落子）
+    function stopDrag(e) {
+      if (!selectedPiece) return;
+      
+      document.onmousemove = null;
+      document.ontouchmove = null;
+      document.onmouseup = null;
+      document.ontouchend = null;
+      
+      const pieceEl = document.getElementById(`${selectedPiece.color}-${selectedPiece.type}-${selectedPiece.row}-${selectedPiece.col}`);
+      pieceEl.classList.remove('dragging');
+      
+      // 计算落子的格子
+      const board = document.getElementById('chessBoard');
+      const boardRect = board.getBoundingClientRect();
+      const x = e.clientX || e.changedTouches[0].clientX;
+      const y = e.clientY || e.changedTouches[0].clientY;
+      
+      const col = Math.floor((x - boardRect.left) / (boardRect.width / BOARD_CONFIG.cols));
+      const row = Math.floor((y - boardRect.top) / (boardRect.height / BOARD_CONFIG.rows));
+      
+      // 验证移动合法性并执行
+      if (validateMove(selectedPiece, row, col)) {
+        executeMove(selectedPiece, row, col);
+      } else {
+        // 非法移动，回到原位置
+        pieceEl.style.left = `${selectedPiece.col * (100/9)}%`;
+        pieceEl.style.top = `${selectedPiece.row * 20}%`;
+        showMsg('非法移动！请遵守走棋规则', 'warn');
+      }
+      
+      selectedPiece = null;
+    }
+
+    // 验证移动是否合法
+    function validateMove(piece, targetRow, targetCol) {
+      // 1. 游戏已结束
+      if (gameState.isGameOver) return false;
+      
+      // 2. 不是自己的回合
+      if (gameState.currentTurn !== gameState.myRole) return false;
+      
+      // 3. 目标位置是山体
+      if (BOARD_CONFIG.mountains.some(m => m[0] === targetRow && m[1] === targetCol)) return false;
+      
+      // 4. 棋子不可移动（地雷/军旗）
+      if (!piece.isMovable) return false;
+      
+      // 5. 移动到自己的棋子位置
+      const sameColorPieces = gameState.chessData[piece.color];
+      if (sameColorPieces.some(p => !p.isCaptured && p.row === targetRow && p.col === targetCol)) return false;
+      
+      // 6. 验证走棋规则（直线移动，铁路可跨格，非铁路只能走一格）
+      const rowDiff = Math.abs(targetRow - piece.row);
+      const colDiff = Math.abs(targetCol - piece.col);
+      
+      // 只能横竖移动，不能斜着走
+      if (rowDiff > 0 && colDiff > 0) return false;
+      
+      // 非铁路格子：只能走一格
+      const isRail = BOARD_CONFIG.rails.some(r => r[0] === piece.row && r[1] === piece.col);
+      if (!isRail && (rowDiff > 1 || colDiff > 1)) return false;
+      
+      return true;
+    }
+
+    // 执行移动并处理吃子
+    function executeMove(piece, targetRow, targetCol) {
+      // 查找目标位置的敌方棋子
+      const enemyColor = piece.color === 'red' ? 'black' : 'red';
+      const enemyPiece = gameState.chessData[enemyColor].find(p => !p.isCaptured && p.row === targetRow && p.col === targetCol);
+      
+      // 处理吃子逻辑
+      if (enemyPiece) {
+        const battleResult = judgeBattle(piece.type, enemyPiece.type);
+        if (battleResult === 'win') {
+          // 我方胜利，敌方棋子被吃
+          enemyPiece.isCaptured = true;
+          showMsg(`你的${piece.type}吃掉了对手的${enemyPiece.type}！`, 'success');
+        } else if (battleResult === 'lose') {
+          // 我方失败，我方棋子被吃，不移动
+          piece.isCaptured = true;
+          showMsg(`你的${piece.type}被对手的${enemyPiece.type}吃掉了！`, 'error');
+          renderChessPieces();
+          return;
+        } else if (battleResult === 'draw') {
+          // 同归于尽
+          piece.isCaptured = true;
+          enemyPiece.isCaptured = true;
+          showMsg(`你的${piece.type}和对手的${enemyPiece.type}同归于尽！`, 'warn');
+          renderChessPieces();
+          return;
+        } else if (battleResult === 'flag') {
+          // 吃到军旗，游戏结束
+          gameState.isGameOver = true;
+          gameState.winner = piece.color;
+          showMsg(`你占领了对手的军旗，胜利！`, 'success');
+          showGameOverPanel();
+          syncGameState();
+          return;
+        }
+      }
+      
+      // 更新棋子位置
+      const myPieces = gameState.chessData[piece.color];
+      const targetPiece = myPieces.find(p => p.type === piece.type && p.row === piece.row && p.col === piece.col);
+      if (targetPiece) {
+        targetPiece.row = targetRow;
+        targetPiece.col = targetCol;
+      }
+      
+      // 切换回合
+      gameState.currentTurn = gameState.currentTurn === 'red' ? 'black' : 'red';
+      document.getElementById('currentTurn').textContent = gameState.currentTurn === 'red' ? '红方' : '黑方';
+      
+      // 重新渲染棋盘
+      renderChessPieces();
+      
+      // 同步游戏状态到对手
+      syncGameState();
+      
+      // 检查游戏是否结束（司令被吃/军旗被占）
+      checkGameOver();
+    }
+
+    // 判定棋子对战结果
+    function judgeBattle(myType, enemyType) {
+      // 吃到军旗
+      if (enemyType === '军旗') return 'flag';
+      
+      // 工兵排雷
+      if (myType === '工兵' && enemyType === '地雷') return 'win';
+      
+      // 炸弹和任何棋子同归于尽
+      if (myType === '炸弹' || enemyType === '炸弹') return 'draw';
+      
+      // 地雷不能被非工兵吃掉
+      if (enemyType === '地雷') return 'lose';
+      
+      // 比较棋子等级
+      const myLevel = CHESS_TYPES[myType];
+      const enemyLevel = CHESS_TYPES[enemyType];
+      
+      if (myLevel > enemyLevel) return 'win';
+      else if (myLevel < enemyLevel) return 'lose';
+      else return 'draw'; // 同等级同归于尽
+    }
+
+    // 检查游戏是否结束
+    function checkGameOver() {
+      // 检查军旗是否被吃
+      const redFlag = gameState.chessData.red.find(p => p.type === '军旗');
+      const blackFlag = gameState.chessData.black.find(p => p.type === '军旗');
+      
+      if (redFlag.isCaptured) {
+        gameState.isGameOver = true;
+        gameState.winner = 'black';
+        showMsg('你的军旗被占领，游戏结束！', 'error');
+        showGameOverPanel();
+        syncGameState();
+      } else if (blackFlag.isCaptured) {
+        gameState.isGameOver = true;
+        gameState.winner = 'red';
+        showMsg('对手的军旗被占领，你胜利！', 'success');
+        showGameOverPanel();
+        syncGameState();
+      }
+      
+      // 可选：检查司令是否被吃（部分规则司令被吃也算输）
+      // const redCommander = gameState.chessData.red.find(p => p.type === '司令');
+      // const blackCommander = gameState.chessData.black.find(p => p.type === '司令');
+      // if (redCommander.isCaptured) {
+      //   gameState.isGameOver = true;
+      //   gameState.winner = 'black';
+      // }
+    }
+
+    // 显示游戏结束面板
+    function showGameOverPanel() {
+      const panel = document.getElementById('gameOverPanel');
+      const winnerText = document.getElementById('winnerText');
+      winnerText.textContent = gameState.winner === 'red' ? '红方胜利！' : '黑方胜利！';
+      panel.style.display = 'block';
+    }
+
+    // 重新开始游戏
+    function restartGame() {
+      document.getElementById('gameOverPanel').style.display = 'none';
+      initChessPieces();
+      gameState.currentTurn = 'red';
+      gameState.isGameOver = false;
+      gameState.winner = '';
+      document.getElementById('currentTurn').textContent = '红方';
+      renderChessPieces();
+      syncGameState();
+      showMsg('游戏重新开始！', 'info');
+    }
+
+    // 点击格子（备用落子方式）
+    function handleCellClick(row, col) {
+      if (!selectedPiece) return;
+      if (validateMove(selectedPiece, row, col)) {
+        executeMove(selectedPiece, row, col);
+      } else {
+        showMsg('非法移动！', 'warn');
+      }
+      selectedPiece = null;
+    }
+
+    // ========== 蓝牙通信核心逻辑 ==========
+    // 显示消息
+    function showMsg(text, type = 'info') {
+      const el = document.getElementById('message');
+      el.textContent = text;
+      el.className = type;
+    }
+
+    // 重置按钮
+    function resetBtn() {
+      document.getElementById('hostBtn').disabled = false;
+      document.getElementById('clientBtn').disabled = false;
+    }
+
+    // 同步游戏状态到对手
+    async function syncGameState() {
+      if (!bluetoothSocket || gameState.isGameOver) return;
+      try {
+        const data = new TextEncoder().encode(JSON.stringify(gameState));
+        await bluetoothSocket.writeValue(data);
+      } catch (err) {
+        showMsg(`同步失败：${err.message}，正在重连...`, 'error');
+        startReconnection();
+      }
+    }
+
+    // 处理接收到的游戏状态
+    function handleRecvGameState(data) {
+      gameState = { ...data };
+      // 更新UI
+      document.getElementById('currentTurn').textContent = gameState.currentTurn === 'red' ? '红方' : '黑方';
+      renderChessPieces();
+      
+      if (gameState.isGameOver) {
+        showGameOverPanel();
+        showMsg(`游戏结束！${gameState.winner === 'red' ? '红方' : '黑方'}胜利`, gameState.winner === gameState.myRole ? 'success' : 'error');
+      } else {
+        showMsg('对手已走棋，现在是你的回合！', 'info');
+      }
+    }
+
+    // 开始断线重连
+    function startReconnection() {
+      if (reconnectionTimer || !bluetoothDevice) return;
+      
+      reconnectionTimer = setInterval(async () => {
+        try {
+          showMsg('尝试重新连接蓝牙...', 'warn');
+          const server = await bluetoothDevice.gatt.connect();
+          const service = await server.getPrimaryService(SERVICE_UUID);
+          const characteristic = await service.getCharacteristic(CHARACTERISTIC_UUID);
+          
+          await characteristic.startNotifications();
+          characteristic.addEventListener('characteristicvaluechanged', (e) => {
+            const data = new TextDecoder().decode(e.target.value);
+            handleRecvGameState(JSON.parse(data));
+          });
+          
+          bluetoothSocket = characteristic;
+          bluetoothServer = service;
+          
+          clearInterval(reconnectionTimer);
+          reconnectionTimer = null;
+          showMsg('蓝牙重连成功！', 'success');
+        } catch (err) {
+          showMsg(`重连失败：${err.message}`, 'error');
+        }
+      }, 3000);
+    }
+
+    // 作为主机（红方）启动
+    async function startAsHost() {
+      try {
+        document.getElementById('hostBtn').disabled = true;
+        document.getElementById('clientBtn').disabled = true;
+        showMsg('正在开启蓝牙主机服务...', 'success');
+        
+        isHost = true;
+        gameState.isHost = true;
+        gameState.myRole = 'red';
+        
+        // 请求蓝牙设备
+        const device = await navigator.bluetooth.requestDevice({
+          acceptAllDevices: true,
+          optionalServices: [SERVICE_UUID]
+        });
+        bluetoothDevice = device; // 保存设备用于重连
+        
+        // 连接GATT服务器
+        const server = await device.gatt.connect();
+        const service = await server.getPrimaryService(SERVICE_UUID);
+        const characteristic = await service.getCharacteristic(CHARACTERISTIC_UUID);
+        
+        // 监听数据
+        await characteristic.startNotifications();
+        characteristic.addEventListener('characteristicvaluechanged', (e) => {
+          const data = new TextDecoder().decode(e.target.value);
+          handleRecvGameState(JSON.parse(data));
+        });
+        
+        // 监听断开事件
+        device.addEventListener('gattserverdisconnected', () => {
+          showMsg('蓝牙连接断开，正在重连...', 'error');
+          startReconnection();
+        });
+        
+        // 保存连接
+        bluetoothSocket = characteristic;
+        bluetoothServer = service;
+        
+        // 初始化棋盘
+        initChessBoard();
+        showMsg('红方主机已开启，等待黑方连接！', 'success');
+      } catch (err) {
+        showMsg(`主机开启失败：${err.message}`, 'error');
+        resetBtn();
+      }
+    }
+
+    // 作为从机（黑方）启动
+    async function startAsClient() {
+      try {
+        document.getElementById('hostBtn').disabled = true;
+        document.getElementById('clientBtn').disabled = true;
+        showMsg('正在搜索附近的红方主机...', 'success');
+        
+        isHost = false;
+        gameState.isHost = false;
+        gameState.myRole = 'black';
+        
+        // 搜索蓝牙设备
+        const device = await navigator.bluetooth.requestDevice({
+          acceptAllDevices: true,
+          optionalServices: [SERVICE_UUID]
+        });
+        bluetoothDevice = device; // 保存设备用于重连
+        
+        showMsg(`找到设备：${device.name || '未知设备'}，正在连接...`, 'success');
+        
+        // 连接GATT服务器
+        const server = await device.gatt.connect();
+        const service = await server.getPrimaryService(SERVICE_UUID);
+        const characteristic = await service.getCharacteristic(CHARACTERISTIC_UUID);
+        
+        // 监听数据
+        await characteristic.startNotifications();
+        characteristic.addEventListener('characteristicvaluechanged', (e) => {
+          const data = new TextDecoder().decode(e.target.value);
+          handleRecvGameState(JSON.parse(data));
+        });
+        
+        // 监听断开事件
+        device.addEventListener('gattserverdisconnected', () => {
+          showMsg('蓝牙连接断开，正在重连...', 'error');
+          startReconnection();
+        });
+        
+        // 保存连接
+        bluetoothSocket = characteristic;
+        bluetoothServer = service;
+        
+        // 初始化棋盘
+        initChessBoard();
+        showMsg('成功连接红方主机，游戏开始！', 'success');
+      } catch (err) {
+        showMsg(`从机连接失败：${err.message}`, 'error');
+        resetBtn();
+      }
+    }
+
+    // 页面关闭时断开蓝牙
+    window.addEventListener('unload', () => {
+      if (reconnectionTimer) clearInterval(reconnectionTimer);
+      if (bluetoothSocket) bluetoothSocket.stopNotifications();
+      if (bluetoothDevice && bluetoothDevice.gatt.connected) {
+        bluetoothDevice.gatt.disconnect();
+      }
+    });
+  </script>
+</body>
+</html>
