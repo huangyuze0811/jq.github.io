@@ -29,6 +29,11 @@ body{background:#f4f6f8;padding:10px}
 .lan-panel{display:none;text-align:center;padding:12px;border:2px solid #1677ff;border-radius:8px;margin:10px auto;max-width:400px;background:#f7fcff}
 .lan-info{font-size:18px;font-weight:bold;color:#1677ff;margin:10px 0}
 .lan-input{padding:8px 12px;border:2px solid #1677ff;border-radius:6px;font-size:16px;width:200px;margin-right:10px;text-align:center}
+/* 新增连接码样式 */
+.code-panel{margin:15px 0;padding:10px;background:#e6f7ff;border-radius:8px}
+.code-title{font-weight:bold;margin-bottom:8px;color:#1677ff}
+.code-display{padding:8px;font-size:14px;background:#fff;border:1px solid #1677ff;border-radius:4px;margin:8px 0;word-break:break-all}
+.code-input{width:100%;padding:8px;margin:8px 0;border:2px solid #1677ff;border-radius:6px;text-align:center}
 .bluetooth-panel{display:none;text-align:center;padding:12px;border:2px solid #ff7d00;background:#fff9f0;border-radius:8px;margin:10px auto;max-width:400px}
 .bluetooth-device-list{max-height:150px;overflow-y:auto;margin:10px 0;text-align:left;padding:10px;border:1px solid #ddd;border-radius:6px}
 .bluetooth-device-item{padding:6px;margin:4px 0;border-radius:4px;cursor:pointer}
@@ -39,7 +44,7 @@ body{background:#f4f6f8;padding:10px}
 .status-connecting{background:#fffbe6;color:#faad14}
 .status-connected{background:#f0fff4;color:#008800}
 .info-bar{display:flex;justify-content:space-between;max-width:650px;margin:10px auto;font-size:15px;padding:0 8px;flex-wrap:wrap;gap:10px}
-.info-bar div{flex:1;min-width:12px;text-align:center}
+.info-bar div{flex:1;min-width:120px;text-align:center}
 .info-bar span{font-weight:bold;color:#1677ff}
 .board-wrap{max-width:600px;margin:20px auto;position:relative}
 .board{
@@ -175,15 +180,28 @@ body{background:#f4f6f8;padding:10px}
     <div class="panel-title">红方主机（局域网信息）</div>
     <div>本机局域网IP：</div>
     <div class="lan-info" id="hostIpInfo">检测中...</div>
-    <div style="margin:10px 0">黑方请输入上方IP进行连接</div>
+    
+    <!-- 新增连接码面板 -->
+    <div class="code-panel">
+      <div class="code-title">主机连接码（请告诉黑方）：</div>
+      <div class="code-display" id="hostCodeDisplay">等待生成...</div>
+      <button class="btn" onclick="copyHostCode()">复制连接码</button>
+    </div>
+    
+    <div style="margin:10px 0">请将上方连接码发给黑方，黑方输入后即可连接</div>
     <button class="btn" onclick="startLanHost()">启动局域网联机服务</button>
   </div>
   
   <!-- 黑方客户端连接面板 -->
   <div class="lan-panel" id="clientLanPanel">
     <div class="panel-title">黑方客户端（连接主机）</div>
-    <div>输入红方主机局域网IP：</div>
+    <div>输入红方主机连接码：</div>
+    <input type="text" class="code-input" id="hostCodeInput" placeholder="请输入主机提供的连接码">
+    
+    <!-- 可选：手动输入主机IP（备用） -->
+    <div style="margin-top:15px">或手动输入主机IP：</div>
     <input type="text" class="lan-input" id="hostIpInput" placeholder="如：192.168.1.100" value="192.168.1.100">
+    
     <button class="btn" onclick="connectLanClient()">连接主机</button>
   </div>
   
@@ -216,77 +234,69 @@ body{background:#f4f6f8;padding:10px}
   </div>
 </div>
 
-<!-- 内嵌 SimplePeer 库（完整精简版） -->
+<!-- 内嵌 SimplePeer 核心库 -->
 <script>
-// SimplePeer 核心精简版（仅保留局域网点对点通信必需功能）
+// SimplePeer 核心精简版（支持跨设备局域网通信）
 (function(window) {
-  // 模拟 SimplePeer 基础构造函数
   window.SimplePeer = function(options) {
     this.options = options || {};
     this.initiator = this.options.initiator || false;
     this.trickle = this.options.trickle !== false;
-    this.config = this.options.config || { iceServers: [] };
+    this.config = this.options.config || { 
+      iceServers: [
+        { urls: 'stun:stun.l.google.com:19302' } // 新增STUN服务器，确保局域网连接
+      ] 
+    };
     this.connected = false;
     this.destroyed = false;
+    this.signalData = null; // 存储信号数据
     
     // 创建 RTCPeerConnection
-    this._pc = new (window.RTCPeerConnection || window.mozRTCPeerConnection || window.webkitRTCPeerConnection)(this.config);
+    try {
+      this._pc = new (window.RTCPeerConnection || window.mozRTCPeerConnection || window.webkitRTCPeerConnection)(this.config);
+    } catch (e) {
+      console.error('创建RTCPeerConnection失败:', e);
+      throw new Error('浏览器不支持WebRTC，请使用Chrome/Edge/Firefox');
+    }
     
-    // 创建数据通道
-    this._dc = this._pc.createDataChannel('simple-peer-data', {
-      ordered: true,
-      maxRetransmits: 0
-    });
+    // 创建数据通道（主机）
+    if (!this.initiator) {
+      this._dc = this._pc.createDataChannel('junqi-data', {
+        ordered: true,
+        maxRetransmits: 0
+      });
+      this._bindDataChannelEvents();
+    } else {
+      // 客户端监听数据通道
+      this._pc.ondatachannel = (e) => {
+        this._dc = e.channel;
+        this._bindDataChannelEvents();
+      };
+    }
     
-    // 绑定事件
-    this._bindEvents();
+    // 绑定ICE事件
+    this._bindIceEvents();
     
-    // 内部事件处理器
+    // 内部事件系统
     this._events = {};
   };
 
-  // 事件绑定
-  window.SimplePeer.prototype._bindEvents = function() {
+  // 绑定数据通道事件
+  window.SimplePeer.prototype._bindDataChannelEvents = function() {
     const self = this;
     
-    // ICE 候选事件
-    this._pc.onicecandidate = function(e) {
-      if (e.candidate && !self.destroyed) {
-        self.emit('signal', {
-          type: 'candidate',
-          candidate: e.candidate
-        });
-      }
-    };
-    
-    // 数据通道打开
     this._dc.onopen = function() {
       self.connected = true;
       self.emit('connect');
     };
     
-    // 接收数据
     this._dc.onmessage = function(e) {
       self.emit('data', e.data);
     };
     
-    // 连接关闭
-    this._pc.onconnectionstatechange = function() {
-      if (self._pc.connectionState === 'closed' || self._pc.connectionState === 'failed') {
-        self.connected = false;
-        self.emit('close');
-      }
-    };
-    
-    // 数据通道关闭
     this._dc.onclose = function() {
       self.connected = false;
       self.emit('close');
-    };
-    
-    // 错误处理
-    this._pc.onerror = function(err) {
-      self.emit('error', err);
     };
     
     this._dc.onerror = function(err) {
@@ -294,25 +304,118 @@ body{background:#f4f6f8;padding:10px}
     };
   };
 
+  // 绑定ICE候选事件
+  window.SimplePeer.prototype._bindIceEvents = function() {
+    const self = this;
+    
+    this._pc.onicecandidate = function(e) {
+      if (e.candidate && !self.destroyed) {
+        self.signalData = self.signalData || {};
+        self.signalData.candidate = e.candidate;
+        
+        // 生成完整的信号数据
+        const signalObj = {
+          type: 'candidate',
+          candidate: e.candidate,
+          sdp: self._pc.localDescription ? self._pc.localDescription.toJSON() : null
+        };
+        
+        self.emit('signal', signalObj);
+        self.signalData = signalObj;
+      }
+    };
+    
+    // 连接状态变化
+    this._pc.onconnectionstatechange = function() {
+      console.log('连接状态:', self._pc.connectionState);
+      if (self._pc.connectionState === 'connected') {
+        self.connected = true;
+        self.emit('connect');
+      } else if (self._pc.connectionState === 'failed' || self._pc.connectionState === 'closed') {
+        self.connected = false;
+        self.emit('close');
+      }
+    };
+    
+    this._pc.onerror = function(err) {
+      self.emit('error', err);
+    };
+  };
+
+  // 生成连接码
+  window.SimplePeer.prototype.generateConnectCode = function() {
+    return new Promise((resolve) => {
+      const self = this;
+      
+      // 创建offer（主机）
+      if (!this.initiator) {
+        this._pc.createOffer({
+          offerToReceiveAudio: false,
+          offerToReceiveVideo: false
+        }).then(offer => {
+          return this._pc.setLocalDescription(offer);
+        }).then(() => {
+          // 生成连接码
+          const code = btoa(JSON.stringify({
+            sdp: this._pc.localDescription.toJSON(),
+            ip: window.localLanIp || 'unknown'
+          }));
+          self.signalData = {
+            sdp: this._pc.localDescription.toJSON()
+          };
+          resolve(code);
+        }).catch(err => {
+          console.error('生成offer失败:', err);
+          self.emit('error', err);
+          resolve(null);
+        });
+      } else {
+        resolve(null); // 客户端不生成连接码
+      }
+    });
+  };
+
+  // 解析连接码
+  window.SimplePeer.prototype.parseConnectCode = function(code) {
+    try {
+      const decoded = JSON.parse(atob(code));
+      return decoded;
+    } catch (e) {
+      throw new Error('无效的连接码');
+    }
+  };
+
   // 发送信号
   window.SimplePeer.prototype.signal = function(data) {
     if (this.destroyed) return;
     
     try {
-      if (data.type === 'offer') {
-        this._pc.setRemoteDescription(new RTCSessionDescription(data))
-          .then(() => this._pc.createAnswer())
-          .then(answer => this._pc.setLocalDescription(answer))
-          .then(() => {
-            this.emit('signal', this._pc.localDescription);
-          })
-          .catch(err => this.emit('error', err));
-      } else if (data.type === 'answer') {
-        this._pc.setRemoteDescription(new RTCSessionDescription(data))
-          .catch(err => this.emit('error', err));
-      } else if (data.type === 'candidate' && data.candidate) {
+      if (data.sdp) {
+        // 设置远程描述
+        const desc = new RTCSessionDescription(data.sdp);
+        this._pc.setRemoteDescription(desc).then(() => {
+          // 客户端创建answer
+          if (this.initiator) {
+            this._pc.createAnswer().then(answer => {
+              return this._pc.setLocalDescription(answer);
+            }).then(() => {
+              this.emit('signal', {
+                type: 'answer',
+                sdp: this._pc.localDescription.toJSON()
+              });
+            }).catch(err => {
+              this.emit('error', err);
+            });
+          }
+        }).catch(err => {
+          this.emit('error', err);
+        });
+      }
+      
+      // 添加ICE候选
+      if (data.candidate) {
         this._pc.addIceCandidate(new RTCIceCandidate(data.candidate))
-          .catch(err => this.emit('error', err));
+          .catch(err => console.warn('添加ICE候选失败:', err));
       }
     } catch (err) {
       this.emit('error', err);
@@ -321,8 +424,8 @@ body{background:#f4f6f8;padding:10px}
 
   // 发送数据
   window.SimplePeer.prototype.send = function(data) {
-    if (!this.connected || this.destroyed) {
-      this.emit('error', new Error('Not connected'));
+    if (!this.connected || this.destroyed || !this._dc) {
+      this.emit('error', new Error('未连接或数据通道未就绪'));
       return;
     }
     
@@ -341,36 +444,23 @@ body{background:#f4f6f8;padding:10px}
     this.connected = false;
     
     try {
-      this._dc.close();
-    } catch (e) {}
-    
-    try {
-      this._pc.close();
+      if (this._dc) this._dc.close();
+      if (this._pc) this._pc.close();
     } catch (e) {}
     
     this.emit('close');
   };
 
-  // 事件监听
+  // 事件系统
   window.SimplePeer.prototype.on = function(event, fn) {
     if (!this._events[event]) this._events[event] = [];
     this._events[event].push(fn);
   };
 
-  // 事件触发
   window.SimplePeer.prototype.emit = function(event, ...args) {
     if (this._events[event]) {
       this._events[event].forEach(fn => fn.apply(this, args));
     }
-  };
-
-  // 兼容原有API
-  window.SimplePeer.prototype.once = function(event, fn) {
-    const onceFn = (...args) => {
-      fn.apply(this, args);
-      this.off(event, onceFn);
-    };
-    this.on(event, onceFn);
   };
 
   window.SimplePeer.prototype.off = function(event, fn) {
@@ -381,12 +471,7 @@ body{background:#f4f6f8;padding:10px}
 
 })(window);
 
-// 标记SimplePeer加载成功
-let isSimplePeerLoaded = true;
-console.log('SimplePeer库加载成功（内嵌版）');
-document.getElementById('btnLanPeer').disabled = false;
-
-// ===================== 全局配置（局域网专属版） =====================
+// ===================== 全局配置 =====================
 const CONN_MODE = { LAN_PEER:3, BLUETOOTH:4 }
 const GAME_MODE = { DARK:1, BRIGHT:2, FLIP:3 }
 const PIECE_RANK = {
@@ -413,7 +498,7 @@ const PIECE_CONFIG = [
 let gameMode = 0
 let connMode = 0
 let isHost = false
-let localLanIp = '' // 本机局域网IP
+let localLanIp = '' 
 let currentTurn = "red"
 let gameOver = false
 let selectedPiece = null
@@ -424,68 +509,98 @@ let deployComplete = false
 let cellWidth = 20
 let cellHeight = 100/13
 
-// 联机核心状态（局域网版）
-let connectStatus = 'disconnected' // disconnected/waiting/connecting/connected
+// 联机状态
+let connectStatus = 'disconnected'
 let isConnected = false
-let peerConnection = null // 局域网点对点连接实例
-let bluetoothDevice = null // 蓝牙设备实例
-let selectedBluetoothDevice = null // 选中的蓝牙设备
+let peerConnection = null
+let bluetoothDevice = null
+let selectedBluetoothDevice = null
+window.localLanIp = ''; // 全局IP变量
 
 // ===================== 页面初始化 =====================
 window.onload = () => {
-  // 初始禁用局域网联机按钮，等待库加载
   document.getElementById('btnLanPeer').disabled = false;
   
-  // 获取本机局域网IP（仅局域网）
+  // 增强的局域网IP检测
   getLocalLanIp()
   buildStandardBoard()
   bindButtonEvents()
   updateConnectStatus(connectStatus)
   
+  // 检查WebRTC支持
+  if (!window.RTCPeerConnection) {
+    showMessage('当前浏览器不支持WebRTC，无法进行局域网联机', 'error')
+    document.getElementById('btnLanPeer').disabled = true
+  }
+  
   // 检查蓝牙支持
   if (!navigator.bluetooth) {
-    showMessage('当前浏览器不支持蓝牙API，请使用Chrome/Edge', 'error')
+    showMessage('当前浏览器不支持蓝牙API', 'warn')
     document.querySelectorAll('.btn[onclick="startHost(4)"]')[0].disabled = true
   }
 }
 
-// ===================== 局域网工具函数 =====================
-/**
- * 获取本机局域网IP（仅局域网，不获取公网IP）
- */
+// ===================== 增强的局域网IP检测 =====================
 function getLocalLanIp() {
   const ipInfoEl = document.getElementById('hostIpInfo')
   
-  // 方法1：通过RTCPeerConnection获取局域网IP
+  // 方法1：通过WebRTC获取
   const RTCPeerConnection = window.RTCPeerConnection || window.mozRTCPeerConnection || window.webkitRTCPeerConnection;
   if (RTCPeerConnection) {
-    const pc = new RTCPeerConnection({ iceServers: [] });
-    pc.createDataChannel('');
-    pc.createOffer().then(offer => pc.setLocalDescription(offer)).catch(err => {
-      console.error('获取IP失败:', err);
-      // 降级方案
-      localLanIp = '192.168.1.100';
-      ipInfoEl.innerText = localLanIp;
-      showMessage('无法自动检测局域网IP，请手动确认', 'warn');
+    const pc = new RTCPeerConnection({
+      iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
     });
     
+    // 创建虚拟数据流触发ICE
+    pc.createDataChannel('');
+    pc.createOffer().then(offer => {
+      return pc.setLocalDescription(offer);
+    }).catch(err => {
+      console.error('获取IP失败:', err);
+      fallbackIpDetection();
+    });
+    
+    // 监听ICE候选提取IP
     pc.onicecandidate = (e) => {
       if (!e.candidate) return;
-      // 只提取局域网IP（192.168/172.16/10.开头）
-      const ipRegex = /(192\.168\.\d+\.\d+|172\.1[6-9]\.\d+\.\d+|172\.2[0-9]\.\d+\.\d+|172\.3[0-1]\.\d+\.\d+|10\.\d+\.\d+\.\d+)/;
-      const ipMatch = e.candidate.candidate.match(ipRegex);
       
-      if (ipMatch && ipMatch[1]) {
-        localLanIp = ipMatch[1];
+      // 提取所有可能的IP
+      const ipRegex = /(192\.168\.\d+\.\d+|172\.1[6-9]\.\d+\.\d+|172\.2[0-9]\.\d+\.\d+|172\.3[0-1]\.\d+\.\d+|10\.\d+\.\d+\.\d+)/g;
+      const ipMatches = e.candidate.candidate.match(ipRegex);
+      
+      if (ipMatches && ipMatches.length > 0) {
+        // 去重并获取第一个有效IP
+        const uniqueIps = [...new Set(ipMatches)];
+        localLanIp = uniqueIps[0];
+        window.localLanIp = localLanIp;
         ipInfoEl.innerText = localLanIp;
-        pc.onicecandidate = null;
+        
+        // 显示所有检测到的IP
+        if (uniqueIps.length > 1) {
+          ipInfoEl.title = `检测到多个IP: ${uniqueIps.join(', ')}`;
+        }
+        
+        pc.close();
       }
     };
+    
+    // 超时降级
+    setTimeout(() => {
+      if (!localLanIp) {
+        fallbackIpDetection();
+      }
+    }, 5000);
+    
   } else {
-    // 降级方案：默认IP
+    fallbackIpDetection();
+  }
+  
+  // 降级IP检测
+  function fallbackIpDetection() {
     localLanIp = '192.168.1.100';
+    window.localLanIp = localLanIp;
     ipInfoEl.innerText = localLanIp;
-    showMessage('无法自动检测局域网IP，请手动确认', 'warn');
+    showMessage('自动检测IP失败，使用默认IP，请手动确认', 'warn');
   }
 }
 
@@ -503,8 +618,6 @@ function updateConnectStatus(status) {
   }
   statusEl.innerText = statusTextMap[status]
   isConnected = status === 'connected'
-  
-  // 更新开始游戏按钮
   updateStartButtonStatus()
 }
 
@@ -516,6 +629,12 @@ function showMessage(text, type = 'info') {
   const msgBox = document.getElementById('msgBox')
   msgBox.innerText = text
   msgBox.className = `msg-box msg-${type}`
+  
+  // 重要提示不自动消失
+  if (type !== 'info' || text.includes('连接码') || text.includes('IP')) {
+    return;
+  }
+  
   setTimeout(() => {
     if (msgBox.innerText === text && connectStatus !== 'waiting') {
       msgBox.className = 'msg-box msg-info'
@@ -524,185 +643,195 @@ function showMessage(text, type = 'info') {
   }, 3000)
 }
 
-// ===================== 局域网点对点联机（核心） =====================
+// ===================== 核心：跨设备局域网联机 =====================
 /**
- * 红方主机启动局域网联机服务（无STUN，纯局域网）
+ * 主机启动服务（生成连接码）
  */
-function startLanHost() {
-  // 检查SimplePeer是否加载
-  if (!isSimplePeerLoaded || !window.SimplePeer) {
-    showMessage('局域网联机库未加载，无法启动主机', 'error');
-    return;
-  }
-  
+async function startLanHost() {
   try {
-    // 关闭已有连接
+    // 关闭旧连接
     if (peerConnection) {
       peerConnection.destroy()
       peerConnection = null
     }
     
-    // 创建局域网点对点连接（主机，禁用STUN）
+    // 创建主机端Peer
     peerConnection = new window.SimplePeer({
       initiator: false, // 主机作为被动方
-      trickle: false,    // 禁用trickle ICE
-      config: {
-        iceServers: [] // 局域网内无需STUN服务器！
-      }
+      trickle: true
     })
     
-    // 更新状态为等待连接
+    // 生成连接码
+    const hostCode = await peerConnection.generateConnectCode();
+    if (!hostCode) {
+      showMessage('生成连接码失败', 'error');
+      return;
+    }
+    
+    // 显示连接码
+    document.getElementById('hostCodeDisplay').innerText = hostCode;
+    
+    // 更新状态
     updateConnectStatus('waiting')
-    showMessage(`局域网主机已启动（IP：${localLanIp}），等待黑方连接...`, 'success')
+    showMessage(`主机已启动！连接码：${hostCode}，请发给黑方`, 'success')
     
-    // 监听signal事件（存储连接信息）
-    peerConnection.on('signal', (data) => {
-      // 局域网内：将signal数据存储到localStorage，供客户端读取
-      localStorage.setItem(`lan_peer_signal_${localLanIp}`, JSON.stringify(data))
-    })
-    
-    // 连接成功
+    // 监听连接事件
     peerConnection.on('connect', () => {
       updateConnectStatus('connected')
-      showMessage('局域网联机成功！', 'success')
+      showMessage('黑方已成功连接！', 'success')
     })
     
-    // 接收消息
+    // 监听消息
     peerConnection.on('data', (data) => {
       try {
-        const msg = JSON.parse(data.toString())
+        const msg = JSON.parse(data)
         handleGameMessage(msg)
       } catch (e) {
         console.error('解析消息失败:', e);
-        showMessage('接收消息格式错误', 'error');
       }
     })
     
-    // 连接关闭
-    peerConnection.on('close', () => {
-      showMessage('局域网连接已关闭', 'warn')
-      updateConnectStatus('disconnected')
-      peerConnection = null
+    // 监听错误
+    peerConnection.on('error', (err) => {
+      showMessage(`主机错误: ${err.message}`, 'error')
+      console.error('Peer错误:', err);
     })
     
-    // 错误处理
-    peerConnection.on('error', (err) => {
-      showMessage(`局域网联机错误: ${err.message}`, 'error')
+    // 监听断开
+    peerConnection.on('close', () => {
+      showMessage('连接已断开', 'warn')
       updateConnectStatus('disconnected')
-      peerConnection = null
     })
     
   } catch (e) {
-    showMessage(`启动局域网主机失败: ${e.message}`, 'error')
+    showMessage(`启动主机失败: ${e.message}`, 'error')
+    console.error('启动主机失败:', e);
     updateConnectStatus('disconnected')
   }
 }
 
 /**
- * 黑方客户端连接局域网主机
+ * 客户端连接主机
  */
-function connectLanClient() {
-  // 检查SimplePeer是否加载
-  if (!isSimplePeerLoaded || !window.SimplePeer) {
-    showMessage('局域网联机库未加载，无法连接主机', 'error');
-    return;
-  }
-  
+async function connectLanClient() {
   try {
+    const hostCode = document.getElementById('hostCodeInput').value.trim()
     const hostIp = document.getElementById('hostIpInput').value.trim()
-    if (!hostIp) {
-      showMessage('请输入红方主机局域网IP', 'error')
+    
+    // 验证输入
+    if (!hostCode && !hostIp) {
+      showMessage('请输入主机连接码或IP', 'error')
       return
     }
     
-    // 验证IP格式（局域网IP）
-    const lanIpRegex = /^(192\.168\.\d+\.\d+|172\.1[6-9]\.\d+\.\d+|172\.2[0-9]\.\d+\.\d+|172\.3[0-1]\.\d+\.\d+|10\.\d+\.\d+\.\d+)$/
-    if (!lanIpRegex.test(hostIp)) {
-      showMessage('请输入有效的局域网IP（如192.168.1.100）', 'error')
-      return
-    }
-    
-    // 更新状态为正在连接
-    updateConnectStatus('connecting')
-    showMessage(`正在连接局域网主机（IP：${hostIp}）...`, 'info')
-    
-    // 获取主机的signal数据（局域网内通过localStorage共享，实际可通过IP直接通信）
-    const hostSignal = localStorage.getItem(`lan_peer_signal_${hostIp}`)
-    if (!hostSignal) {
-      showMessage('未找到该IP的主机，请确认：1.主机已启动 2.IP正确 3.同一局域网', 'error')
-      updateConnectStatus('disconnected')
-      return
-    }
-    
-    // 关闭已有连接
+    // 关闭旧连接
     if (peerConnection) {
       peerConnection.destroy()
       peerConnection = null
     }
     
-    // 创建局域网点对点连接（客户端，禁用STUN）
+    // 更新状态
+    updateConnectStatus('connecting')
+    showMessage('正在连接主机...', 'info')
+    
+    // 创建客户端Peer
     peerConnection = new window.SimplePeer({
-      initiator: true,   // 客户端作为主动方
-      trickle: false,
-      config: {
-        iceServers: [] // 局域网内无需STUN服务器！
-      }
+      initiator: true, // 客户端作为主动方
+      trickle: true
     })
     
-    // 监听signal事件，发送连接请求
-    peerConnection.on('signal', (data) => {
+    // 如果有连接码，解析并连接
+    if (hostCode) {
       try {
-        peerConnection.signal(JSON.parse(hostSignal))
+        const codeData = peerConnection.parseConnectCode(hostCode);
+        peerConnection.signal(codeData);
+        showMessage('正在使用连接码连接...', 'info');
       } catch (e) {
-        console.error('发送连接请求失败:', e);
-        showMessage('连接请求格式错误', 'error');
+        showMessage(`无效的连接码: ${e.message}`, 'error');
         updateConnectStatus('disconnected');
+        return;
       }
-    })
+    }
     
-    // 连接成功
+    // 监听连接成功
     peerConnection.on('connect', () => {
       updateConnectStatus('connected')
-      showMessage(`成功连接到局域网主机（IP：${hostIp}）！`, 'success')
+      showMessage(`成功连接到主机！`, 'success')
     })
     
-    // 接收消息
+    // 监听信号生成（客户端需要发送answer）
+    peerConnection.on('signal', (data) => {
+      console.log('客户端信号:', data);
+    })
+    
+    // 监听消息
     peerConnection.on('data', (data) => {
       try {
-        const msg = JSON.parse(data.toString())
+        const msg = JSON.parse(data)
         handleGameMessage(msg)
       } catch (e) {
         console.error('解析消息失败:', e);
-        showMessage('接收消息格式错误', 'error');
       }
     })
     
-    // 连接关闭
-    peerConnection.on('close', () => {
-      showMessage('局域网连接已关闭', 'warn')
+    // 监听错误
+    peerConnection.on('error', (err) => {
+      showMessage(`连接错误: ${err.message}`, 'error')
+      console.error('客户端错误:', err);
       updateConnectStatus('disconnected')
-      peerConnection = null
     })
     
-    // 错误处理
-    peerConnection.on('error', (err) => {
-      showMessage(`连接失败: ${err.message}`, 'error')
+    // 监听断开
+    peerConnection.on('close', () => {
+      showMessage('与主机的连接已断开', 'warn')
       updateConnectStatus('disconnected')
-      peerConnection = null
     })
+    
+    // 超时检测
+    setTimeout(() => {
+      if (connectStatus === 'connecting' && !peerConnection.connected) {
+        showMessage('连接超时，请检查：1.连接码是否正确 2.是否在同一局域网 3.防火墙是否关闭', 'error')
+        updateConnectStatus('disconnected')
+      }
+    }, 10000);
     
   } catch (e) {
-    showMessage(`连接局域网主机失败: ${e.message}`, 'error')
+    showMessage(`连接失败: ${e.message}`, 'error')
+    console.error('连接主机失败:', e);
     updateConnectStatus('disconnected')
   }
 }
 
 /**
- * 发送游戏消息（局域网内）
+ * 复制主机连接码
+ */
+function copyHostCode() {
+  const codeText = document.getElementById('hostCodeDisplay').innerText;
+  if (codeText === '等待生成...' || !codeText) {
+    showMessage('连接码尚未生成', 'warn');
+    return;
+  }
+  
+  navigator.clipboard.writeText(codeText).then(() => {
+    showMessage('连接码已复制到剪贴板', 'success');
+  }).catch(() => {
+    // 降级方案
+    const textArea = document.createElement('textarea');
+    textArea.value = codeText;
+    document.body.appendChild(textArea);
+    textArea.select();
+    document.execCommand('copy');
+    document.body.removeChild(textArea);
+    showMessage('连接码已复制', 'success');
+  });
+}
+
+/**
+ * 发送游戏消息
  */
 function sendGameMessage(data) {
   if (!peerConnection || !peerConnection.connected) {
-    showMessage('局域网未连接，无法发送消息', 'error')
+    showMessage('未连接到主机，无法发送消息', 'error')
     return
   }
   
@@ -717,12 +846,13 @@ function sendGameMessage(data) {
 }
 
 /**
- * 处理接收的游戏消息
+ * 处理游戏消息
  */
 function handleGameMessage(msg) {
   try {
+    if (!msg || !msg.data) return;
+    
     if (msg.data.type === 'piece_move') {
-      // 同步对方棋子移动
       const piece = pieces.find(p => p.id === msg.data.pieceId)
       if (piece) {
         piece.row = msg.data.row
@@ -730,43 +860,41 @@ function handleGameMessage(msg) {
         renderPieces()
       }
     }
+    
     if (msg.data.type === 'turn_change') {
-      // 同步回合切换
       currentTurn = msg.data.turn
       updateGameInfo()
       showMessage(`回合切换：${currentTurn === 'red' ? '红方' : '黑方'}行动`, 'info')
     }
+    
     if (msg.data.type === 'game_over') {
-      // 同步游戏结束
       gameOver = true
       showGameOver(msg.data.winner)
     }
+    
     if (msg.data.type === 'game_start') {
-      // 同步游戏开始
       currentTurn = msg.data.turn
       updateGameInfo()
       renderPieces()
     }
   } catch (e) {
-    console.error('处理游戏消息失败:', e);
+    console.error('处理消息失败:', e);
     showMessage('处理游戏消息出错', 'error');
   }
 }
 
-// ===================== 蓝牙功能（保留原有） =====================
+// ===================== 蓝牙功能（保留） =====================
 async function scanBluetoothDevices() {
   try {
-    showMessage('正在扫描蓝牙设备，请在系统弹窗中允许权限', 'info')
+    showMessage('正在扫描蓝牙设备，请允许权限', 'info')
     const deviceListEl = document.getElementById('bluetoothDeviceList')
     deviceListEl.innerHTML = '扫描中...'
     
-    // 调用浏览器蓝牙扫描API
     const devices = await navigator.bluetooth.requestDevice({
       acceptAllDevices: true,
       optionalServices: ['generic_access']
     })
     
-    // 显示扫描结果
     deviceListEl.innerHTML = ''
     const deviceItem = document.createElement('div')
     deviceItem.className = 'bluetooth-device-item'
@@ -782,14 +910,9 @@ async function scanBluetoothDevices() {
     }
     deviceListEl.appendChild(deviceItem)
     
-    showMessage('蓝牙设备扫描完成，请选择并连接', 'success')
+    showMessage('蓝牙设备扫描完成', 'success')
   } catch (err) {
     showMessage(`蓝牙扫描失败: ${err.message}`, 'error')
-    if (err.name === 'NotFoundError') {
-      showMessage('未找到蓝牙设备，请确保设备已开启并可被发现', 'error')
-    } else if (err.name === 'SecurityError') {
-      showMessage('蓝牙权限被拒绝，请允许浏览器访问蓝牙', 'error')
-    }
   }
 }
 
@@ -801,19 +924,16 @@ async function connectBluetoothDevice() {
   
   try {
     updateConnectStatus('connecting')
-    showMessage(`正在连接蓝牙设备：${selectedBluetoothDevice.name || '未知设备'}`, 'info')
+    showMessage(`正在连接蓝牙设备...`, 'info')
     
-    // 连接蓝牙设备GATT服务器
     const bluetoothServer = await selectedBluetoothDevice.gatt.connect()
     bluetoothDevice = selectedBluetoothDevice
     
-    // 连接成功
     updateConnectStatus('connected')
-    showMessage(`蓝牙设备连接成功：${selectedBluetoothDevice.name || '未知设备'}`, 'success')
+    showMessage(`蓝牙设备连接成功`, 'success')
     
-    // 监听断开事件
     selectedBluetoothDevice.addEventListener('gattserverdisconnected', () => {
-      showMessage('蓝牙设备已断开连接', 'warn')
+      showMessage('蓝牙设备已断开', 'warn')
       disconnectBluetooth()
     })
   } catch (err) {
@@ -831,23 +951,23 @@ function disconnectBluetooth() {
     selectedBluetoothDevice = null
     updateConnectStatus('disconnected')
     document.getElementById('btnConnectBluetooth').disabled = true
-    document.querySelectorAll('.bluetooth-device-item').forEach(i => i.style.background = '')
     showMessage('已断开蓝牙连接', 'info')
   } catch (err) {
     showMessage(`断开蓝牙失败: ${err.message}`, 'error')
   }
 }
 
-// ===================== 棋盘&游戏逻辑（保留原有） =====================
+// ===================== 棋盘和游戏逻辑（保留） =====================
 function buildStandardBoard() {
   const board = document.getElementById('board')
   board.innerHTML = `
-    <div class="deploy-tips" id="deployTips">排兵布阵中：点击棋子可重新选择移动</div>
+    <div class="deploy-tips" id="deployTips">排兵布阵中：点击棋子选择，再次点击目标格子放置</div>
     <div class="over-layer" id="overLayer">
       <div class="over-text" id="overText">红方胜利！</div>
       <button class="over-btn" onclick="restartGame()">重新开始</button>
     </div>
   `;
+  
   cells = []
   cellWidth = 20
   cellHeight = 100/13
@@ -910,7 +1030,7 @@ function bindButtonEvents() {
     document.getElementById('hostLanPanel').style.display = 'block'
     document.getElementById('clientLanPanel').style.display = 'none'
     document.getElementById('bluetoothPanel').style.display = 'none'
-    showMessage('你是红方（主机），请选择局域网联机方式并完成联机', 'info')
+    showMessage('你是红方（主机），请启动联机服务', 'info')
     updateGameInfo()
   }
   
@@ -920,7 +1040,7 @@ function bindButtonEvents() {
     document.getElementById('hostLanPanel').style.display = 'none'
     document.getElementById('clientLanPanel').style.display = 'block'
     document.getElementById('bluetoothPanel').style.display = 'none'
-    showMessage('你是黑方（客户端），请选择局域网联机方式并连接主机', 'info')
+    showMessage('你是黑方（客户端），请输入主机连接码', 'info')
     updateGameInfo()
   }
   
@@ -930,7 +1050,6 @@ function bindButtonEvents() {
       currentTurn = 'red'
       updateGameInfo()
       renderPieces()
-      // 发送游戏开始消息给对方
       sendGameMessage({ type: 'game_start', turn: 'red' })
     }
   }
@@ -951,17 +1070,13 @@ function startHost(mode) {
   if (mode === CONN_MODE.LAN_PEER) {
     if (isHost) {
       document.getElementById('hostLanPanel').style.display = 'block'
-      document.getElementById('clientLanPanel').style.display = 'none'
     } else {
       document.getElementById('clientLanPanel').style.display = 'block'
-      document.getElementById('hostLanPanel').style.display = 'none'
     }
-    showMessage(`已选择局域网点对点联机，主机请启动服务，客户端请输入主机IP连接`, 'success')
+    showMessage(`已选择局域网点对点联机`, 'success')
   } else if (mode === CONN_MODE.BLUETOOTH) {
     document.getElementById('bluetoothPanel').style.display = 'block'
-    document.getElementById('hostLanPanel').style.display = 'none'
-    document.getElementById('clientLanPanel').style.display = 'none'
-    showMessage(`已选择蓝牙信道，请扫描并连接设备（需蓝牙开启）`, 'success')
+    showMessage(`已选择蓝牙联机`, 'success')
   }
   
   updateGameInfo()
@@ -988,14 +1103,14 @@ function showDeployPanel() {
   document.getElementById('deployPanel').style.display = 'block'
   document.getElementById('deployTips').style.display = 'block'
   isDeployPhase = true
-  showMessage('进入布阵，已落下的棋子可点击重新移动','info')
+  showMessage('进入布阵阶段', 'info')
 }
 
 function startDeploy() {
   document.querySelectorAll('.piece').forEach(p=>p.remove())
   const my = isHost?'red':'black'
   my==='red' ? deployRedPiecesForDeploy() : deployBlackPiecesForDeploy()
-  showMessage('点击棋子（包括已落下的）可重新选择','info')
+  showMessage('点击棋子可重新放置', 'info')
 }
 
 function deployRedPiecesForDeploy() {
@@ -1047,7 +1162,7 @@ function handleDeployPieceClick(piece) {
   if(selectedPiece && selectedPiece.element) selectedPiece.element.classList.remove('piece-selected')
   selectedPiece = piece
   if(piece.element) piece.element.classList.add('piece-selected')
-  showMessage(`已选中【${piece.name}】，可点新位置重新放置`,'info')
+  showMessage(`已选中【${piece.name}】`, 'info')
 }
 
 function handleDeployCellClick(cell) {
@@ -1056,7 +1171,7 @@ function handleDeployCellClick(cell) {
   const tc = +cell.dataset.col
 
   if(!validateDeployRule(selectedPiece, tr, tc)){
-    showMessage('不符合布阵规则','error')
+    showMessage('不符合布阵规则', 'error')
     return
   }
 
@@ -1066,7 +1181,7 @@ function handleDeployCellClick(cell) {
   selectedPiece.element.style.top = `${tr*cellHeight+0.4}%`
   selectedPiece.element.classList.remove('piece-selected')
   selectedPiece = null
-  showMessage('棋子已重新放置','success')
+  showMessage('棋子已放置', 'success')
   checkAllPiecesDeployed()
 }
 
@@ -1103,6 +1218,7 @@ function confirmDeploy() {
   isDeployPhase = false
   document.getElementById('deployPanel').style.display='none'
   document.getElementById('deployTips').style.display='none'
+  
   if(gameMode===1){
     const my = isHost?'red':'black'
     pieces.forEach(p=>{
@@ -1112,7 +1228,8 @@ function confirmDeploy() {
       }
     })
   }
-  showMessage('布阵完成，等待联机成功后开始游戏','success')
+  
+  showMessage('布阵完成，等待联机后开始游戏', 'success')
   updateStartButtonStatus()
   updateGameInfo()
 }
@@ -1131,19 +1248,27 @@ function deployFlipPieces() {
 function renderPieces() {
   document.querySelectorAll('.piece').forEach(p=>p.remove())
   const b=document.getElementById('board')
+  
   pieces.filter(p=>!p.isCaptured).forEach(p=>{
     if(p.row===-1||p.col===-1)return
+    
     const el=document.createElement('div')
     el.className=`piece ${p.color==='red'?'piece-red':'piece-black'}`
+    
     if(gameMode===2) el.innerText=p.name
     else if(gameMode===1) el.innerText=(p.color===(isHost?'red':'black')||p.isRevealed)?p.name:'?'
     else if(gameMode===3) el.innerText=p.isRevealed?p.name:'?'
+    
     if(!p.isMovable) el.classList.add('piece-fixed')
-    if((gameMode===1||gameMode===3) && !((gameMode===1&&p.color===(isHost?'red':'black'))||(p.isRevealed))) el.className='piece piece-unknown'
+    if((gameMode===1||gameMode===3) && !((gameMode===1&&p.color===(isHost?'red':'black'))||(p.isRevealed))) {
+      el.className='piece piece-unknown'
+    }
+    
     el.style.left=`${p.col*cellWidth+1}%`
     el.style.top=`${p.row*cellHeight+0.4}%`
     el.dataset.pieceId=p.id
     el.onclick=e=>{e.preventDefault();handlePieceClick(e,p)}
+    
     b.appendChild(el)
     p.element=el
   })
@@ -1154,10 +1279,20 @@ function handlePieceClick(e,p) {
     showMessage(!isConnected ? '未联机，禁止操作' : '游戏未准备完成', 'warn');
     return
   }
-  if(p.color!==currentTurn){showMessage('不是你的回合','warn');return}
-  if(!p.isMovable){showMessage('不可移动','info');return}
+  
+  if(p.color!==currentTurn){
+    showMessage('不是你的回合', 'warn');
+    return
+  }
+  
+  if(!p.isMovable){
+    showMessage('该棋子不可移动', 'info');
+    return
+  }
+  
   if(selectedPiece&&selectedPiece.element)selectedPiece.element.classList.remove('piece-selected')
   cells.forEach(c=>c.element.classList.remove('cell-selected'))
+  
   selectedPiece=p
   p.element.classList.add('piece-selected')
   highlightMovableCells(p)
@@ -1176,7 +1311,9 @@ function handleCellClick(cell) {
     showMessage(!isConnected ? '未联机，禁止操作' : '游戏未准备完成', 'warn');
     return
   }
+  
   const tr=+cell.dataset.row,tc=+cell.dataset.col
+  
   if(!validateMove(selectedPiece,tr,tc)){
     cells.forEach(c=>c.element.classList.remove('cell-selected'));
     selectedPiece.element.classList.remove('piece-selected');
@@ -1184,37 +1321,39 @@ function handleCellClick(cell) {
     return;
   }
   
-  // 记录移动前的位置
+  // 记录原位置
   const oldRow = selectedPiece.row
   const oldCol = selectedPiece.col
   
-  // 处理棋子对战
+  // 处理对战
   const tgt=pieces.find(x=>!x.isCaptured&&x.row===tr&&x.col===tc&&x.color!==selectedPiece.color)
   if(tgt){
     const res=judgeBattle(selectedPiece,tgt)
+    
     if(res==='win'){
       tgt.isCaptured=true;
       if(tgt.name==='军旗'){
         gameOver=true;
         showGameOver(selectedPiece.color);
-        // 发送游戏结束消息
         sendGameMessage({ type: 'game_over', winner: selectedPiece.color })
         return;
       }
     }
+    
     if(res==='lose') selectedPiece.isCaptured=true
     if(res==='draw'){
       selectedPiece.isCaptured=true;
       tgt.isCaptured=true;
     }
+    
     if(gameMode===1)tgt.isRevealed=true
   }
   
-  // 更新棋子位置
+  // 更新位置
   selectedPiece.row=tr;
   selectedPiece.col=tc;
   
-  // 发送棋子移动消息给对方
+  // 发送移动消息
   sendGameMessage({
     type: 'piece_move',
     pieceId: selectedPiece.id,
@@ -1228,13 +1367,14 @@ function handleCellClick(cell) {
   const newTurn = currentTurn === 'red' ? 'black' : 'red'
   currentTurn = newTurn
   
-  // 发送回合切换消息
+  // 发送回合消息
   sendGameMessage({ type: 'turn_change', turn: newTurn })
   
   // 刷新界面
   cells.forEach(c=>c.element.classList.remove('cell-selected'))
   selectedPiece.element.classList.remove('piece-selected')
   selectedPiece=null
+  
   renderPieces()
   updateGameInfo()
 }
@@ -1243,13 +1383,17 @@ function validateMove(p,tr,tc) {
   if(tr<0||tr>=13||tc<0||tc>=5)return false
   const ce=cells.find(x=>x.row===tr&&x.col===tc)
   if(!ce)return false
+  
   if(ce.type==='F'&&!pieces.some(x=>x.row===tr&&x.col===tc&&x.color!==p.color))return false
   if(pieces.some(x=>!x.isCaptured&&x.row===tr&&x.col===tc&&x.color===p.color))return false
+  
   const dr=Math.abs(tr-p.row),dc=Math.abs(tc-p.col)
   const road=(dr+dc)===1
   let rail=false
+  
   if(p.name==='工兵')rail=(dr===0||dc===0)
   else rail=(dr===0||dc===0)
+  
   return road||rail
 }
 
@@ -1257,6 +1401,7 @@ function judgeBattle(a,d) {
   if(d.name==='军旗')return'win'
   if(a.name==='炸弹'||d.name==='炸弹')return'draw'
   if(d.name==='地雷')return a.name==='工兵'?'win':'lose'
+  
   return PIECE_RANK[a.name]>PIECE_RANK[d.name]?'win':PIECE_RANK[a.name]<PIECE_RANK[d.name]?'lose':'draw'
 }
 
@@ -1276,12 +1421,11 @@ function showGameOver(winner) {
 }
 
 function restartGame() {
-  // 断开局域网连接
+  // 断开连接
   if (peerConnection) {
     peerConnection.destroy()
     peerConnection = null
   }
-  // 断开蓝牙连接
   disconnectBluetooth()
   
   // 重置状态
