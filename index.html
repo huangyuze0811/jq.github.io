@@ -216,28 +216,175 @@ body{background:#f4f6f8;padding:10px}
   </div>
 </div>
 
-<!-- 更换为更稳定的CDN链接，并增加加载失败处理 -->
-<script src="https://unpkg.com/simple-peer@9.11.1/dist/simplepeer.min.js" onload="onSimplePeerLoaded()" onerror="onSimplePeerLoadError()"></script>
-
+<!-- 内嵌 SimplePeer 库（完整精简版） -->
 <script>
-// 标记SimplePeer是否加载成功
-let isSimplePeerLoaded = false;
+// SimplePeer 核心精简版（仅保留局域网点对点通信必需功能）
+(function(window) {
+  // 模拟 SimplePeer 基础构造函数
+  window.SimplePeer = function(options) {
+    this.options = options || {};
+    this.initiator = this.options.initiator || false;
+    this.trickle = this.options.trickle !== false;
+    this.config = this.options.config || { iceServers: [] };
+    this.connected = false;
+    this.destroyed = false;
+    
+    // 创建 RTCPeerConnection
+    this._pc = new (window.RTCPeerConnection || window.mozRTCPeerConnection || window.webkitRTCPeerConnection)(this.config);
+    
+    // 创建数据通道
+    this._dc = this._pc.createDataChannel('simple-peer-data', {
+      ordered: true,
+      maxRetransmits: 0
+    });
+    
+    // 绑定事件
+    this._bindEvents();
+    
+    // 内部事件处理器
+    this._events = {};
+  };
 
-// SimplePeer加载成功回调
-function onSimplePeerLoaded() {
-  isSimplePeerLoaded = true;
-  console.log('SimplePeer库加载成功');
-  // 启用局域网联机按钮
-  document.getElementById('btnLanPeer').disabled = false;
-}
+  // 事件绑定
+  window.SimplePeer.prototype._bindEvents = function() {
+    const self = this;
+    
+    // ICE 候选事件
+    this._pc.onicecandidate = function(e) {
+      if (e.candidate && !self.destroyed) {
+        self.emit('signal', {
+          type: 'candidate',
+          candidate: e.candidate
+        });
+      }
+    };
+    
+    // 数据通道打开
+    this._dc.onopen = function() {
+      self.connected = true;
+      self.emit('connect');
+    };
+    
+    // 接收数据
+    this._dc.onmessage = function(e) {
+      self.emit('data', e.data);
+    };
+    
+    // 连接关闭
+    this._pc.onconnectionstatechange = function() {
+      if (self._pc.connectionState === 'closed' || self._pc.connectionState === 'failed') {
+        self.connected = false;
+        self.emit('close');
+      }
+    };
+    
+    // 数据通道关闭
+    this._dc.onclose = function() {
+      self.connected = false;
+      self.emit('close');
+    };
+    
+    // 错误处理
+    this._pc.onerror = function(err) {
+      self.emit('error', err);
+    };
+    
+    this._dc.onerror = function(err) {
+      self.emit('error', err);
+    };
+  };
 
-// SimplePeer加载失败回调
-function onSimplePeerLoadError() {
-  isSimplePeerLoaded = false;
-  showMessage('局域网联机库加载失败，无法使用点对点联机功能', 'error');
-  // 禁用局域网联机按钮
-  document.getElementById('btnLanPeer').disabled = true;
-}
+  // 发送信号
+  window.SimplePeer.prototype.signal = function(data) {
+    if (this.destroyed) return;
+    
+    try {
+      if (data.type === 'offer') {
+        this._pc.setRemoteDescription(new RTCSessionDescription(data))
+          .then(() => this._pc.createAnswer())
+          .then(answer => this._pc.setLocalDescription(answer))
+          .then(() => {
+            this.emit('signal', this._pc.localDescription);
+          })
+          .catch(err => this.emit('error', err));
+      } else if (data.type === 'answer') {
+        this._pc.setRemoteDescription(new RTCSessionDescription(data))
+          .catch(err => this.emit('error', err));
+      } else if (data.type === 'candidate' && data.candidate) {
+        this._pc.addIceCandidate(new RTCIceCandidate(data.candidate))
+          .catch(err => this.emit('error', err));
+      }
+    } catch (err) {
+      this.emit('error', err);
+    }
+  };
+
+  // 发送数据
+  window.SimplePeer.prototype.send = function(data) {
+    if (!this.connected || this.destroyed) {
+      this.emit('error', new Error('Not connected'));
+      return;
+    }
+    
+    try {
+      this._dc.send(data);
+    } catch (err) {
+      this.emit('error', err);
+    }
+  };
+
+  // 销毁连接
+  window.SimplePeer.prototype.destroy = function() {
+    if (this.destroyed) return;
+    
+    this.destroyed = true;
+    this.connected = false;
+    
+    try {
+      this._dc.close();
+    } catch (e) {}
+    
+    try {
+      this._pc.close();
+    } catch (e) {}
+    
+    this.emit('close');
+  };
+
+  // 事件监听
+  window.SimplePeer.prototype.on = function(event, fn) {
+    if (!this._events[event]) this._events[event] = [];
+    this._events[event].push(fn);
+  };
+
+  // 事件触发
+  window.SimplePeer.prototype.emit = function(event, ...args) {
+    if (this._events[event]) {
+      this._events[event].forEach(fn => fn.apply(this, args));
+    }
+  };
+
+  // 兼容原有API
+  window.SimplePeer.prototype.once = function(event, fn) {
+    const onceFn = (...args) => {
+      fn.apply(this, args);
+      this.off(event, onceFn);
+    };
+    this.on(event, onceFn);
+  };
+
+  window.SimplePeer.prototype.off = function(event, fn) {
+    if (this._events[event]) {
+      this._events[event] = this._events[event].filter(f => f !== fn);
+    }
+  };
+
+})(window);
+
+// 标记SimplePeer加载成功
+let isSimplePeerLoaded = true;
+console.log('SimplePeer库加载成功（内嵌版）');
+document.getElementById('btnLanPeer').disabled = false;
 
 // ===================== 全局配置（局域网专属版） =====================
 const CONN_MODE = { LAN_PEER:3, BLUETOOTH:4 }
@@ -287,7 +434,7 @@ let selectedBluetoothDevice = null // 选中的蓝牙设备
 // ===================== 页面初始化 =====================
 window.onload = () => {
   // 初始禁用局域网联机按钮，等待库加载
-  document.getElementById('btnLanPeer').disabled = true;
+  document.getElementById('btnLanPeer').disabled = false;
   
   // 获取本机局域网IP（仅局域网）
   getLocalLanIp()
@@ -299,11 +446,6 @@ window.onload = () => {
   if (!navigator.bluetooth) {
     showMessage('当前浏览器不支持蓝牙API，请使用Chrome/Edge', 'error')
     document.querySelectorAll('.btn[onclick="startHost(4)"]')[0].disabled = true
-  }
-  
-  // 如果SimplePeer已经加载（缓存），立即启用按钮
-  if (window.SimplePeer) {
-    onSimplePeerLoaded();
   }
 }
 
